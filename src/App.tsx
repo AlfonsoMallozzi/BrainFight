@@ -23,15 +23,14 @@ interface GameRoom {
   answers: Record<string, number>;
 }
 
-type GameState = 'main-menu' | 'team-select' | 'connecting' | 'waiting' | 'battle' | 'ended';
+type GameState = 'team-select' | 'connecting' | 'waiting' | 'battle' | 'ended';
 type GamePhase = 'question' | 'results' | 'ended';
 
 export default function App() {
-  const [gameState, setGameState] = useState<GameState>('main-menu');
+  const [gameState, setGameState] = useState<GameState>('team-select');
   const [gamePhase, setGamePhase] = useState<GamePhase>('question');
   const [selectedTeam, setSelectedTeam] = useState<Team | null>(null);
   const [playerName, setPlayerName] = useState('');
-  const [roomIdInput, setRoomIdInput] = useState('');
   const [roomId, setRoomId] = useState<string | null>(null);
   const [playerId, setPlayerId] = useState<string | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
@@ -42,47 +41,13 @@ export default function App() {
 
   const currentQuestion = malwareQuestions[currentQuestionIndex];
 
-  // === MAIN MENU ===
-  if (gameState === 'main-menu') {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-4">
-        <h1 className="text-4xl font-bold text-red-400 mb-8">🔥 BATTLE ARENA 🔥</h1>
-        <button
-          onClick={() => setGameState('team-select')}
-          className="bg-red-600 hover:bg-red-500 text-white font-bold py-3 px-8 rounded-lg transition-colors"
-        >
-          Create/Join New Room
-        </button>
-        <div className="flex gap-2 items-center">
-          <input
-            type="text"
-            placeholder="Enter Room ID"
-            value={roomIdInput}
-            onChange={(e) => setRoomIdInput(e.target.value)}
-            className="px-4 py-2 rounded border border-gray-600 bg-gray-900 text-white"
-          />
-          <button
-            onClick={() => {
-              if (!roomIdInput) return;
-              setRoomId(roomIdInput);
-              setGameState('team-select'); // join then select team
-            }}
-            className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded-lg transition-colors"
-          >
-            Join Room
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // === TEAM SELECTION ===
+  // Team selection handler
   const handleTeamSelect = async (team: Team) => {
     setSelectedTeam(team);
     const name = team === 'red' ? 'RedHacker' : 'BlueDefender';
     setPlayerName(name);
     setGameState('connecting');
-
+    
     try {
       // Join/create room
       const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-83bde5a9/rooms/join`, {
@@ -93,19 +58,21 @@ export default function App() {
         },
         body: JSON.stringify({
           playerName: name,
-          team,
-          roomId: roomId // send roomId if joining existing
+          team: team
         })
       });
 
-      if (!response.ok) throw new Error(`Failed to join room: ${response.statusText}`);
+      if (!response.ok) {
+        throw new Error(`Failed to join room: ${response.statusText}`);
+      }
 
       const data = await response.json();
       setRoomId(data.roomId);
       setPlayerId(data.playerId);
       setRoom(data.room);
       setGameState('waiting');
-
+      
+      // Start polling for room updates
       startRoomPolling(data.roomId);
     } catch (error) {
       console.error('Error joining room:', error);
@@ -114,19 +81,22 @@ export default function App() {
     }
   };
 
-  // === ROOM POLLING ===
+  // Start room polling
   const startRoomPolling = (roomId: string) => {
     const interval = setInterval(async () => {
       try {
         const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-83bde5a9/rooms/${roomId}`, {
-          headers: { 'Authorization': `Bearer ${publicAnonKey}` }
+          headers: {
+            'Authorization': `Bearer ${publicAnonKey}`
+          }
         });
+
         if (response.ok) {
           const data = await response.json();
           setRoom(data.room);
           setPlayers(data.players);
           setCurrentQuestionIndex(data.room.currentQuestion);
-
+          
           if (data.room.gamePhase === 'question') {
             setGamePhase('question');
             setGameState('battle');
@@ -135,9 +105,10 @@ export default function App() {
           } else if (data.room.gamePhase === 'ended') {
             setGamePhase('ended');
             setGameState('ended');
+            // Find winner
             const alivePlayers = data.players.filter((p: Player) => p.isAlive);
             if (alivePlayers.length > 0) {
-              const winner = alivePlayers.reduce((prev: Player, current: Player) =>
+              const winner = alivePlayers.reduce((prev: Player, current: Player) => 
                 prev.health > current.health ? prev : current
               );
               setWinner(winner);
@@ -150,46 +121,72 @@ export default function App() {
       }
     }, 1000);
 
+    // Cleanup on unmount
     return () => clearInterval(interval);
   };
 
-  // === REST OF LOGIC ===
+  // Handle answer submission
   const handleAnswer = async (playerId: string, answerIndex: number) => {
     if (!roomId || !room) return;
+
     try {
       const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-83bde5a9/rooms/${roomId}/answer`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${publicAnonKey}` },
-        body: JSON.stringify({ playerId, answerIndex })
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${publicAnonKey}`
+        },
+        body: JSON.stringify({
+          playerId,
+          answerIndex
+        })
       });
-      if (!response.ok) throw new Error('Failed to submit answer');
+
+      if (!response.ok) {
+        throw new Error('Failed to submit answer');
+      }
+
       const data = await response.json();
-      if (data.allAnswered) setGamePhase('results');
+      if (data.allAnswered) {
+        setGamePhase('results');
+      }
     } catch (error) {
       console.error('Error submitting answer:', error);
     }
   };
 
+  // Handle next question
   const handleNextQuestion = async () => {
     if (!roomId) return;
+
     try {
       const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-83bde5a9/rooms/${roomId}/next`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${publicAnonKey}` }
+        headers: {
+          'Authorization': `Bearer ${publicAnonKey}`
+        }
       });
-      if (response.ok) setGamePhase('question');
+
+      if (response.ok) {
+        setGamePhase('question');
+      }
     } catch (error) {
       console.error('Error moving to next question:', error);
     }
   };
 
+  // Start game
   const startGame = async () => {
     if (!roomId) return;
+
     try {
       const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-83bde5a9/rooms/${roomId}/start`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${publicAnonKey}` }
+        headers: {
+          'Authorization': `Bearer ${publicAnonKey}`
+        }
       });
+
       if (response.ok) {
         setGameState('battle');
         setGamePhase('question');
@@ -199,12 +196,12 @@ export default function App() {
     }
   };
 
+  // Reset game
   const resetGame = () => {
-    setGameState('main-menu');
+    setGameState('team-select');
     setGamePhase('question');
     setSelectedTeam(null);
     setPlayerName('');
-    setRoomIdInput('');
     setRoomId(null);
     setPlayerId(null);
     setPlayers([]);
@@ -214,15 +211,77 @@ export default function App() {
     setConnectionError(null);
   };
 
-  // === TEAM SELECTION UI ===
   if (gameState === 'team-select') {
-    return <TeamSelection onTeamSelect={handleTeamSelect} />;
+    return (
+      <div>
+        <TeamSelection onTeamSelect={handleTeamSelect} />
+        {connectionError && (
+          <div className="fixed top-4 left-4 right-4 bg-red-900/90 text-red-200 p-4 rounded-lg border border-red-600">
+            {connectionError}
+          </div>
+        )}
+      </div>
+    );
   }
 
-  // === CONNECTING / WAITING / BATTLE / ENDED ===
-  if (gameState === 'connecting') return <div>Connecting...</div>;
-  if (gameState === 'waiting') return <div>Waiting for players...</div>;
-  if (gameState === 'battle' && currentQuestion)
+  if (gameState === 'connecting') {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-red-500 mx-auto mb-4"></div>
+          <h2 className="text-2xl font-bold text-red-400">Connecting to Battle Arena...</h2>
+          <p className="text-gray-300 mt-2">Finding opponents...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (gameState === 'waiting') {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <div className="max-w-2xl w-full text-center">
+          <h1 className="text-4xl font-bold text-red-400 mb-8">🔥 BATTLE ARENA 🔥</h1>
+          <div className="bg-gray-900/50 rounded-lg p-8 border border-red-600/30">
+            <h2 className="text-2xl font-bold text-white mb-6">Waiting for Players...</h2>
+            <div className="space-y-4 mb-8">
+              <p className="text-gray-300">Room ID: <span className="font-mono text-red-400">{roomId?.slice(0, 8)}</span></p>
+              <p className="text-gray-300">Players: {players.length}/100</p>
+              
+              <div className="grid grid-cols-2 gap-4 mt-6">
+                <div className="bg-red-900/30 p-4 rounded-lg border border-red-600/50">
+                  <h3 className="font-bold text-red-400 mb-2">🔥 RED TEAM</h3>
+                  {players.filter(p => p.team === 'red').map(p => (
+                    <div key={p.id} className="text-red-200">{p.name}</div>
+                  ))}
+                </div>
+                <div className="bg-blue-900/30 p-4 rounded-lg border border-blue-600/50">
+                  <h3 className="font-bold text-blue-400 mb-2">🛡️ BLUE TEAM</h3>
+                  {players.filter(p => p.team === 'blue').map(p => (
+                    <div key={p.id} className="text-blue-200">{p.name}</div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            
+            {players.length >= 2 && (
+              <button 
+                onClick={startGame}
+                className="bg-red-600 hover:bg-red-500 text-white font-bold py-3 px-8 rounded-lg transition-colors"
+              >
+                START BATTLE!
+              </button>
+            )}
+            
+            {players.length < 2 && (
+              <p className="text-gray-400">Need at least 2 players to start...</p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (gameState === 'battle' && currentQuestion) {
     return (
       <BattleArena
         players={players}
@@ -236,12 +295,32 @@ export default function App() {
         currentPlayerId={playerId}
       />
     );
-  if (gameState === 'ended')
+  }
+
+  if (gameState === 'ended') {
     return (
-      <div>
-        Game ended. <button onClick={resetGame}>Play Again</button>
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <div className="max-w-2xl w-full text-center">
+          <h1 className="text-4xl font-bold text-red-400 mb-8">🔥 BATTLE ENDED! 🔥</h1>
+          <div className="bg-gray-900/50 rounded-lg p-8 border border-red-600/30">
+            <h2 className="text-3xl font-bold text-yellow-400 mb-4">
+              🏆 {winner?.name} WINS! 🏆
+            </h2>
+            <p className="text-xl text-gray-300 mb-8">
+              Final Health: {winner?.health}/{winner?.maxHealth} HP
+            </p>
+            
+            <button 
+              onClick={resetGame}
+              className="bg-red-600 hover:bg-red-500 text-white font-bold py-3 px-8 rounded-lg transition-colors"
+            >
+              PLAY AGAIN
+            </button>
+          </div>
+        </div>
       </div>
     );
+  }
 
   return null;
 }
