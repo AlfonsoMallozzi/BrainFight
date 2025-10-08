@@ -119,7 +119,7 @@ export default function App() {
       } catch (error) {
         console.error('Error polling room:', error);
       }
-    }, 1000);
+    }, 10000);
 
     // Cleanup on unmount
     return () => clearInterval(interval);
