@@ -38,22 +38,30 @@ app.use('*', logger(console.log));
 app.post('/make-server-83bde5a9/rooms/join', async (c) => {
   try {
     const { playerName, team } = await c.req.json();
-    
+    console.log('--- Player trying to join ---');
+    console.log('Incoming data:', { playerName, team });
+
     if (!playerName || !team) {
       return new Response('Missing playerName or team', { status: 400 });
     }
 
     // Find existing room with space or create new one
     const existingRooms = await kv.getByPrefix('room:');
+    console.log('Existing rooms fetched from KV:', existingRooms);
+
     let targetRoom: GameRoom | null = null;
 
     for (const roomData of existingRooms) {
+      console.log('Checking room:', roomData.key, roomData.value);
       const room = roomData.value as GameRoom;
       if (room.players.length < 100 && room.gamePhase === 'waiting') {
         targetRoom = room;
+        console.log('Found a room to join:', room.id);
         break;
       }
     }
+
+    if (!targetRoom) console.log('No available room found — a new one will be created');
 
     const playerId = crypto.randomUUID();
     const player: Player = {
@@ -86,6 +94,9 @@ app.post('/make-server-83bde5a9/rooms/join', async (c) => {
 
     // Store player data
     await kv.set(`player:${playerId}`, player);
+
+    console.log('Player stored:', player);
+    console.log('Room stored:', targetRoom);
 
     return c.json({
       roomId: targetRoom.id,
@@ -190,9 +201,7 @@ async function processQuestionResults(room: GameRoom) {
     const playerAnswer = room.answers[playerId];
     
     if (playerAnswer === correctAnswer) {
-      // Correct answer - apply team bonus
       if (player.team === 'red') {
-        // Red team deals damage to random opponent
         const opponents = room.players.filter(pid => {
           const p = kv.get(`player:${pid}`) as any;
           return p && p.id !== playerId && p.isAlive;
@@ -210,11 +219,9 @@ async function processQuestionResults(room: GameRoom) {
           }
         }
       } else if (player.team === 'blue') {
-        // Blue team gains shield
         player.shield += 11;
       }
     } else {
-      // Wrong answer - take damage
       const damage = Math.max(0, 25 - player.shield);
       player.health = Math.max(0, player.health - damage);
       player.shield = Math.max(0, player.shield - 25);
@@ -224,11 +231,9 @@ async function processQuestionResults(room: GameRoom) {
     await kv.set(`player:${playerId}`, player);
   }
 
-  // Move to results phase
   room.gamePhase = 'results';
   await kv.set(`room:${room.id}`, room);
 
-  // Check if game should end
   const alivePlayers = room.players.filter(async pid => {
     const p = await kv.get(`player:${pid}`) as Player;
     return p && p.isAlive;
@@ -264,3 +269,4 @@ app.post('/make-server-83bde5a9/rooms/:roomId/next', async (c) => {
 });
 
 serve(app.fetch);
+
