@@ -34,16 +34,36 @@ app.use('*', cors({
 
 app.use('*', logger(console.log));
 
+// ========================
+// Helper: Start question timer
+// ========================
+async function startQuestionTimer(roomId: string) {
+  setTimeout(async () => {
+    const room = await kv.get(`room:${roomId}`) as GameRoom;
+    if (!room || room.gamePhase !== 'question') return;
+
+    // Mark unanswered players as wrong
+    for (const playerId of room.players) {
+      if (room.answers[playerId] === undefined) {
+        room.answers[playerId] = -1; // unanswered
+      }
+    }
+
+    await processQuestionResults(room);
+  }, 10000); // 10 seconds
+}
+
+// ========================
 // Create or join a game room
+// ========================
 app.post('/make-server-83bde5a9/rooms/join', async (c) => {
   try {
     const { playerName, team } = await c.req.json();
-    
+
     if (!playerName || !team) {
       return new Response('Missing playerName or team', { status: 400 });
     }
 
-    // Find existing room with space or create new one
     const existingRooms = await kv.getByPrefix('room:');
     let targetRoom: GameRoom | null = null;
 
@@ -67,7 +87,6 @@ app.post('/make-server-83bde5a9/rooms/join', async (c) => {
     };
 
     if (!targetRoom) {
-      // Create new room
       const roomId = crypto.randomUUID();
       targetRoom = {
         id: roomId,
@@ -79,12 +98,10 @@ app.post('/make-server-83bde5a9/rooms/join', async (c) => {
       };
       await kv.set(`room:${roomId}`, targetRoom);
     } else {
-      // Join existing room
       targetRoom.players.push(playerId);
       await kv.set(`room:${targetRoom.id}`, targetRoom);
     }
 
-    // Store player data
     await kv.set(`player:${playerId}`, player);
 
     return c.json({
@@ -99,25 +116,25 @@ app.post('/make-server-83bde5a9/rooms/join', async (c) => {
   }
 });
 
+// ========================
 // Start game in room
+// ========================
 app.post('/make-server-83bde5a9/rooms/:roomId/start', async (c) => {
   try {
     const roomId = c.req.param('roomId');
     const room = await kv.get(`room:${roomId}`) as GameRoom;
-    
-    if (!room) {
-      return new Response('Room not found', { status: 404 });
-    }
 
-    if (room.players.length < 2) {
-      return new Response('Need at least 2 players to start', { status: 400 });
-    }
+    if (!room) return new Response('Room not found', { status: 404 });
+    if (room.players.length < 2) return new Response('Need at least 2 players', { status: 400 });
 
     room.gamePhase = 'question';
     room.currentQuestion = 0;
     room.answers = {};
-    
+
     await kv.set(`room:${roomId}`, room);
+
+    // Start 10-second timer
+    startQuestionTimer(roomId);
 
     return c.json({ success: true, room });
   } catch (error) {
@@ -126,25 +143,22 @@ app.post('/make-server-83bde5a9/rooms/:roomId/start', async (c) => {
   }
 });
 
+// ========================
 // Submit answer
+// ========================
 app.post('/make-server-83bde5a9/rooms/:roomId/answer', async (c) => {
   try {
     const roomId = c.req.param('roomId');
     const { playerId, answerIndex } = await c.req.json();
-    
+
     const room = await kv.get(`room:${roomId}`) as GameRoom;
-    if (!room) {
-      return new Response('Room not found', { status: 404 });
-    }
+    if (!room) return new Response('Room not found', { status: 404 });
 
     room.answers[playerId] = answerIndex;
     await kv.set(`room:${roomId}`, room);
 
-    // Check if all players have answered
     const allAnswered = room.players.every(pid => room.answers[pid] !== undefined);
-    
     if (allAnswered) {
-      // Process results and update player health/shields
       await processQuestionResults(room);
     }
 
@@ -155,17 +169,15 @@ app.post('/make-server-83bde5a9/rooms/:roomId/answer', async (c) => {
   }
 });
 
+// ========================
 // Get room status
+// ========================
 app.get('/make-server-83bde5a9/rooms/:roomId', async (c) => {
   try {
     const roomId = c.req.param('roomId');
     const room = await kv.get(`room:${roomId}`) as GameRoom;
-    
-    if (!room) {
-      return new Response('Room not found', { status: 404 });
-    }
+    if (!room) return new Response('Room not found', { status: 404 });
 
-    // Get all players in room
     const players: Player[] = [];
     for (const playerId of room.players) {
       const player = await kv.get(`player:${playerId}`) as Player;
@@ -179,29 +191,26 @@ app.get('/make-server-83bde5a9/rooms/:roomId', async (c) => {
   }
 });
 
+// ========================
 // Process question results
+// ========================
 async function processQuestionResults(room: GameRoom) {
-  const correctAnswer = 1; // Most questions have answer index 1
-  
+  const correctAnswer = 1; // Hardcoded for now
+
   for (const playerId of room.players) {
     const player = await kv.get(`player:${playerId}`) as Player;
     if (!player || !player.isAlive) continue;
 
     const playerAnswer = room.answers[playerId];
-    
+
     if (playerAnswer === correctAnswer) {
-      // Correct answer - apply team bonus
+      // Correct answer
       if (player.team === 'red') {
-        // Red team deals damage to random opponent
-        const opponents = room.players.filter(pid => {
-          const p = kv.get(`player:${pid}`) as any;
-          return p && p.id !== playerId && p.isAlive;
-        });
-        
+        const opponents = room.players.filter(pid => pid !== playerId);
         if (opponents.length > 0) {
           const randomOpponent = opponents[Math.floor(Math.random() * opponents.length)];
           const opponent = await kv.get(`player:${randomOpponent}`) as Player;
-          if (opponent) {
+          if (opponent && opponent.isAlive) {
             const damage = Math.max(0, 10 - opponent.shield);
             opponent.health = Math.max(0, opponent.health - damage);
             opponent.shield = Math.max(0, opponent.shield - 10);
@@ -210,17 +219,16 @@ async function processQuestionResults(room: GameRoom) {
           }
         }
       } else if (player.team === 'blue') {
-        // Blue team gains shield
         player.shield += 11;
       }
     } else {
-      // Wrong answer - take damage
+      // Wrong or unanswered (-1)
       const damage = Math.max(0, 25 - player.shield);
       player.health = Math.max(0, player.health - damage);
       player.shield = Math.max(0, player.shield - 25);
       if (player.health <= 0) player.isAlive = false;
     }
-    
+
     await kv.set(`player:${playerId}`, player);
   }
 
@@ -229,10 +237,11 @@ async function processQuestionResults(room: GameRoom) {
   await kv.set(`room:${room.id}`, room);
 
   // Check if game should end
-  const alivePlayers = room.players.filter(async pid => {
+  const alivePlayers = [];
+  for (const pid of room.players) {
     const p = await kv.get(`player:${pid}`) as Player;
-    return p && p.isAlive;
-  });
+    if (p && p.isAlive) alivePlayers.push(p);
+  }
 
   if (alivePlayers.length <= 1 || room.currentQuestion >= 14) {
     room.gamePhase = 'ended';
@@ -240,21 +249,21 @@ async function processQuestionResults(room: GameRoom) {
   }
 }
 
+// ========================
 // Next question
+// ========================
 app.post('/make-server-83bde5a9/rooms/:roomId/next', async (c) => {
   try {
     const roomId = c.req.param('roomId');
     const room = await kv.get(`room:${roomId}`) as GameRoom;
-    
-    if (!room) {
-      return new Response('Room not found', { status: 404 });
-    }
+    if (!room) return new Response('Room not found', { status: 404 });
 
     room.currentQuestion++;
     room.answers = {};
     room.gamePhase = 'question';
-    
     await kv.set(`room:${roomId}`, room);
+
+    startQuestionTimer(roomId);
 
     return c.json({ success: true, room });
   } catch (error) {
